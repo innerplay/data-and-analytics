@@ -8,6 +8,7 @@ import pandas as pd
 from google.cloud import bigquery, pubsub_v1
 from google.cloud.exceptions import NotFound
 from dotenv import load_dotenv
+from google.oauth2 import service_account
 
 # ------------------------------------------------------------------------
 #  LOAD CONFIGURATION
@@ -40,7 +41,13 @@ PAYLOAD = dict(
 	query_txt = os.getenv("QUERY_TXT")
 )
 PUBSUB = os.getenv("PUBSUB")
-bq = bigquery.Client(project=BQ_PROJECT)
+
+creds_json = os.environ['GOOGLE_APPLICATION_CREDENTIALS_JSON']
+
+creds_dict = json.loads(creds_json)
+credentials = service_account.Credentials.from_service_account_info(creds_dict)
+
+bq = bigquery.Client(project=BQ_PROJECT, credentials=credentials)
 
 valid_cols = [
 	'id_date',
@@ -300,7 +307,7 @@ def merge_staging_to_prod():
 
 def publish_message(payload: dict):
 	"""Publishes a message with the given payload to Pub/Sub."""
-	publisher = pubsub_v1.PublisherClient()
+	publisher = pubsub_v1.PublisherClient(credentials=credentials)
 	topic_path = publisher.topic_path(BQ_PROJECT, TOPIC_ID)
 
 	data = json.dumps(payload).encode("utf-8")

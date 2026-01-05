@@ -9,6 +9,7 @@ from google.ads.googleads.client import GoogleAdsClient
 from google.ads.googleads.errors import GoogleAdsException
 from google.cloud import bigquery
 from google.cloud.exceptions import NotFound
+from google.oauth2 import service_account
 
 # Logging setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -29,8 +30,13 @@ DATE_TO = date.today() - timedelta(days=DAYS_TO)
 
 date_range = f"{DATE_FROM},{DATE_TO}"
 
+creds_json = os.environ['GOOGLE_APPLICATION_CREDENTIALS_JSON']
+
+creds_dict = json.loads(creds_json)
+credentials = service_account.Credentials.from_service_account_info(creds_dict)
+
 # BigQuery client
-bq = bigquery.Client(project=BQ_PROJECT)
+bq = bigquery.Client(project=BQ_PROJECT, credentials=credentials)
 
 # BigQuery schema
 SCHEMA = [
