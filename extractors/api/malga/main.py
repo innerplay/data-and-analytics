@@ -48,44 +48,51 @@ for days in range(DAYS_FROM, DAYS_TO - 1, -1):
         }
 
         response = requests.post(base_url, json=payload, headers=headers)
-        if response.status_code != 200:
-            logger.error(f"Failed to request report: {response.status_code}")
-            continue
-        try:
-            data = response.json()
-            files.append(data.get("id", ''))
-        except Exception as e:
-            logger.error(f"Failed to parse response: {e}")
-            continue
+        response.raise_for_status()
+        data = response.json()
+        files.append(data.get("id", ''))
     except Exception as e:
-        logger.error(f"Failed to process report for date {date}: {e}")
-        continue
+        logger.error(f"Failed to request report: {e}")
 
 time.sleep(5)
 
 dataframes = []
 
+MAX_RETRIES = 10
+BASE_DELAY = 2  # seconds (base delay for exponential backoff)
+
 for file in files:
     file_url = f"https://api.malga.io/v1/reports/{file}/files/1"
+    
+    retries = 0
+    while retries < MAX_RETRIES:
+        response = requests.get(file_url, headers={"X-Client-Id": MALGA_CLIENT_ID, "X-Api-Key": MALGA_API_KEY})
+        
+        if response.status_code == 200:
+            file_content = response.content
 
-    response = requests.get(file_url, headers={"X-Client-Id": MALGA_CLIENT_ID, "X-Api-Key": MALGA_API_KEY})
-    if response.status_code == 200:
-        file_content = response.content
-
-        df = None
-        try:
-            df = pd.read_csv(StringIO(file_content.decode('utf-8')))
-        except Exception:
+            df = None
             try:
-                df = pd.read_excel(BytesIO(file_content))
-            except Exception as e:
-                logger.error(str(e))
-                continue
-        if df is not None:
-            dataframes.append(df)
-    else:
-        logger.warning(f"Unexpected status code {response.status_code} for file {file}")
-        continue
+                df = pd.read_csv(StringIO(file_content.decode('utf-8')))
+            except Exception:
+                try:
+                    df = pd.read_excel(BytesIO(file_content))
+                except Exception as e:
+                    logger.error(str(e))
+
+            if df is not None:
+                dataframes.append(df)
+            break  # Success, exit retry loop
+        else:
+            retries += 1
+            if retries < MAX_RETRIES:
+                # Exponential backoff: 2^retries * BASE_DELAY
+                delay = (2 ** retries) * BASE_DELAY
+                logger.info(f"File {file} not ready yet (status {response.status_code}). Retrying in {delay}s... (attempt {retries}/{MAX_RETRIES})")
+                time.sleep(delay)
+            else:
+                logger.warning(f"File {file} not ready after {MAX_RETRIES} attempts (status {response.status_code}). Skipping.")
+
 creds_json = os.environ['GOOGLE_APPLICATION_CREDENTIALS_JSON']
 
 creds_dict = json.loads(creds_json)
