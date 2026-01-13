@@ -48,11 +48,18 @@ for days in range(DAYS_FROM, DAYS_TO - 1, -1):
         }
 
         response = requests.post(base_url, json=payload, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        files.append(data.get("id", ''))
+        if response.status_code != 200:
+            logger.error(f"Failed to request report: {response.status_code}")
+            continue
+        try:
+            data = response.json()
+            files.append(data.get("id", ''))
+        except Exception as e:
+            logger.error(f"Failed to parse response: {e}")
+            continue
     except Exception as e:
-        logger.error(f"Failed to request report: {e}")
+        logger.error(f"Failed to process report for date {date}: {e}")
+        continue
 
 time.sleep(5)
 
@@ -73,12 +80,12 @@ for file in files:
                 df = pd.read_excel(BytesIO(file_content))
             except Exception as e:
                 logger.error(str(e))
-
+                continue
         if df is not None:
             dataframes.append(df)
     else:
         logger.warning(f"Unexpected status code {response.status_code} for file {file}")
-
+        continue
 creds_json = os.environ['GOOGLE_APPLICATION_CREDENTIALS_JSON']
 
 creds_dict = json.loads(creds_json)
