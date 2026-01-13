@@ -62,7 +62,6 @@ for file in files:
     file_url = f"https://api.malga.io/v1/reports/{file}/files/1"
 
     response = requests.get(file_url, headers={"X-Client-Id": MALGA_CLIENT_ID, "X-Api-Key": MALGA_API_KEY})
-    response.raise_for_status()
     if response.status_code == 200:
         file_content = response.content
 
@@ -77,6 +76,8 @@ for file in files:
 
         if df is not None:
             dataframes.append(df)
+    else:
+        logger.warning(f"Unexpected status code {response.status_code} for file {file}")
 
 creds_json = os.environ['GOOGLE_APPLICATION_CREDENTIALS_JSON']
 
