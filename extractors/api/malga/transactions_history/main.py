@@ -54,7 +54,7 @@ for days in range(DAYS_FROM, DAYS_TO - 1, -1):
     except Exception as e:
         logger.error(f"Failed to request report: {e}")
 
-time.sleep(5)
+time.sleep(60)
 
 dataframes = []
 
@@ -73,16 +73,20 @@ for file in files:
 
             df = None
             try:
-                df = pd.read_csv(StringIO(file_content.decode('utf-8')))
+                df = pd.read_csv(StringIO(file_content.decode('utf-8')), dtype=str)
             except Exception:
                 try:
-                    df = pd.read_excel(BytesIO(file_content))
+                    df = pd.read_excel(BytesIO(file_content), dtype=str)
                 except Exception as e:
                     logger.error(str(e))
 
             if df is not None:
+                df['etl_load_date'] = datetime.now(timezone.utc)
                 dataframes.append(df)
             break  # Success, exit retry loop
+        elif response.status_code == 404:
+            logger.warning(f"File {file} not found at {file_url} (404). Skipping.")
+            break  # Skip this file_url and continue to next file
         else:
             retries += 1
             if retries < MAX_RETRIES:
@@ -94,7 +98,6 @@ for file in files:
                 logger.warning(f"File {file} not ready after {MAX_RETRIES} attempts (status {response.status_code}). Skipping.")
 
 creds_json = os.environ['GOOGLE_APPLICATION_CREDENTIALS_JSON']
-
 creds_dict = json.loads(creds_json)
 credentials = service_account.Credentials.from_service_account_info(creds_dict)
 
@@ -109,8 +112,8 @@ else:
     all_data = pd.DataFrame()
 
 if not all_data.empty:
-    table_id = f"{project_id}.raw_data.malga_transactions"
-    staging_table_id = f"{project_id}.staging.malga_transactions"
+    table_id = f"{project_id}.raw_data.malga_transactions_history"
+    staging_table_id = f"{project_id}.staging.malga_transactions_history"
 
     # Table schema
     schema = [
@@ -118,6 +121,7 @@ if not all_data.empty:
         bigquery.SchemaField("charge_id", "STRING"),
         bigquery.SchemaField("created_at", "TIMESTAMP"),
         bigquery.SchemaField("data", "STRING"),
+        bigquery.SchemaField("etl_load_date", "TIMESTAMP")
     ]
 
     # Check and create tables if they don't exist
@@ -133,7 +137,7 @@ if not all_data.empty:
     ensure_table_exists(staging_table_id, schema)
 
     # Key columns to keep as separate fields
-    key_columns = ['transaction_request_id', 'charge_id', 'created_at']
+    key_columns = ['transaction_request_id', 'charge_id', 'created_at', 'etl_load_date']
 
     # Build the transformed dataframe with key columns + JSON data column
     transformed_rows = []
@@ -152,6 +156,7 @@ if not all_data.empty:
     # Load to staging table (overwrite)
     job_config = bigquery.LoadJobConfig(
         write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+        schema=schema
     )
     job = bq_client.load_table_from_dataframe(transformed_df, staging_table_id, job_config=job_config)
     job.result()
@@ -165,18 +170,19 @@ if not all_data.empty:
         UPDATE SET
             charge_id = source.charge_id,
             created_at = source.created_at,
-            data = source.data
+            data = source.data,
+            etl_load_date = source.etl_load_date
     WHEN NOT MATCHED THEN
-        INSERT (transaction_request_id, charge_id, created_at, data)
-        VALUES (source.transaction_request_id, source.charge_id, source.created_at, source.data)
+        INSERT (transaction_request_id, charge_id, created_at, data, etl_load_date)
+        VALUES (source.transaction_request_id, source.charge_id, source.created_at, source.data, source.etl_load_date)
     """
 
     bq_client.query(merge_query).result()
+    logger.info(f"Merged {len(transformed_df)} rows into BigQuery table {table_id}.")
 
     # Drop staging table
     bq_client.delete_table(staging_table_id)
     logger.info(f"Dropped staging table {staging_table_id}")
 
-    logger.info(f"Merged {len(transformed_df)} rows into BigQuery table {table_id}.")
 else:
     logger.warning("No data to write.")
