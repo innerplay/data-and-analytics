@@ -139,6 +139,14 @@ def transform_to_bigquery_table(raw_data: list) -> pd.DataFrame:
         if not customer_id:
             logger.warning("Skipping customer without ID")
             continue
+            
+        created_at = customer_dict.get('created')
+        if not created_at:
+            logger.warning("Skipping customer without created_at")
+            continue
+        
+        # Parse Unix timestamp (seconds) to date object (yyyy-mm-dd format)
+        created_at = datetime.datetime.fromtimestamp(created_at, tz=datetime.timezone.utc).date()
         
         # Convert entire customer to JSON string
         data_json = json.dumps(customer_dict, default=str, ensure_ascii=False)
@@ -148,6 +156,7 @@ def transform_to_bigquery_table(raw_data: list) -> pd.DataFrame:
         
         transformed_rows.append({
             'id': customer_id,
+            'created_at': created_at,
             'data': data_json,
             'etl_load_date': etl_load_date
         })
@@ -155,11 +164,11 @@ def transform_to_bigquery_table(raw_data: list) -> pd.DataFrame:
     # Convert to DataFrame
     if transformed_rows:
         df = pd.DataFrame(transformed_rows)
-        logger.info(f"Created DataFrame with {len(df)} rows and 3 columns: id, data, etl_load_date")
+        logger.info(f"Created DataFrame with {len(df)} rows and 4 columns: id, created_at, data, etl_load_date")
         return df
     else:
         logger.warning("No data to transform")
-        return pd.DataFrame(columns=['id', 'data', 'etl_load_date'])
+        return pd.DataFrame(columns=['id', 'created_at', 'data', 'etl_load_date'])
 
 
 def merge_to_bigquery(
@@ -204,9 +213,10 @@ def merge_to_bigquery(
     table_id = f"{bq_project_id}.{dataset}.{table_name}"
     staging_table_id = f"{bq_project_id}.staging.{table_name}"
     
-    # Define schema for the 3 columns
+    # Define schema for the 4 columns
     schema = [
         bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
+        bigquery.SchemaField("created_at", "DATE", mode="NULLABLE"),
         bigquery.SchemaField("data", "STRING", mode="NULLABLE"),  # JSON stored as STRING
         bigquery.SchemaField("etl_load_date", "TIMESTAMP", mode="NULLABLE")
     ]
@@ -222,7 +232,7 @@ def merge_to_bigquery(
         df['etl_load_date'] = pd.to_datetime(df['etl_load_date'], errors='coerce', utc=True)
     
     # Ensure we only have the 3 required columns in the correct order
-    required_columns = ['id', 'data', 'etl_load_date']
+    required_columns = ['id', 'created_at', 'data', 'etl_load_date']
     if list(df.columns) != required_columns:
         # Reorder and filter to only required columns
         missing_cols = [col for col in required_columns if col not in df.columns]
@@ -232,17 +242,19 @@ def merge_to_bigquery(
         logger.info(f"Reordered DataFrame columns to: {required_columns}")
     
     # Ensure tables exist
-    def ensure_table_exists(table_ref: str):
+    def ensure_table_exists(table_ref: str, is_partitioned: bool = False):
         try:
             bq_client.get_table(table_ref)
             logger.info(f"Table {table_ref} already exists")
         except Exception:
             table = bigquery.Table(table_ref, schema=schema)
+            if is_partitioned:
+                table.time_partitioning = bigquery.TimePartitioning(field="created_at")
             bq_client.create_table(table)
-            logger.info(f"Created table {table_ref}")
+            logger.info(f"Created table {table_ref}" + (" with partitioning on created_at" if is_partitioned else ""))
     
-    ensure_table_exists(table_id)
-    ensure_table_exists(staging_table_id)
+    ensure_table_exists(table_id, is_partitioned=True)
+    ensure_table_exists(staging_table_id, is_partitioned=False)
     
     # Load to staging table (overwrite)
     logger.info(f"Loading {len(df)} rows to staging table {staging_table_id}")
