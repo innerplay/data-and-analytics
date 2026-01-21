@@ -149,12 +149,14 @@ def transform_to_bigquery_table(raw_data: list) -> pd.DataFrame:
             logger.warning("Skipping event without event_timestamp")
             continue
 
+        created_at = datetime.datetime.fromtimestamp(event_timestamp, tz=datetime.timezone.utc).date()
+
         # extract updated object id
         object_id = event_dict.get('data', {}).get('object', {}).get('id')
         if not object_id:
             logger.warning("Skipping event without updated object ID")
             continue
-
+        
         data_json = json.dumps(event_dict.get('data', {}).get('object', {}), default=str, ensure_ascii=False)
         if not data_json:
             logger.warning("Skipping event without updated object ID")
@@ -167,6 +169,7 @@ def transform_to_bigquery_table(raw_data: list) -> pd.DataFrame:
             'id': event_id,
             'event_timestamp': event_timestamp,
             'object_id': object_id,
+            'created_at': created_at,
             'data': data_json,
             'etl_load_date': etl_load_date
         })
@@ -174,11 +177,11 @@ def transform_to_bigquery_table(raw_data: list) -> pd.DataFrame:
     # Convert to DataFrame
     if transformed_rows:
         df = pd.DataFrame(transformed_rows)
-        logger.info(f"Created DataFrame with {len(df)} rows and 5 columns: id, event_timestamp, object_id, data, etl_load_date")
+        logger.info(f"Created DataFrame with {len(df)} rows and 5 columns: id, event_timestamp, object_id, created_at, data, etl_load_date")
         return df
     else:
         logger.warning("No data to transform")
-        return pd.DataFrame(columns=['id', 'event_timestamp', 'object_id', 'data', 'etl_load_date'])
+        return pd.DataFrame(columns=['id', 'event_timestamp', 'object_id', 'created_at', 'data', 'etl_load_date'])
 
 
 def merge_to_bigquery(
@@ -228,6 +231,7 @@ def merge_to_bigquery(
         bigquery.SchemaField("id", "STRING", mode="REQUIRED"),
         bigquery.SchemaField("event_timestamp", "INTEGER", mode="NULLABLE"),
         bigquery.SchemaField("object_id", "STRING", mode="NULLABLE"),
+        bigquery.SchemaField("created_at", "DATE", mode="NULLABLE"),
         bigquery.SchemaField("data", "STRING", mode="REQUIRED"),  # JSON stored as STRING
         bigquery.SchemaField("etl_load_date", "TIMESTAMP", mode="NULLABLE")
     ]
@@ -243,7 +247,7 @@ def merge_to_bigquery(
         df['etl_load_date'] = pd.to_datetime(df['etl_load_date'], errors='coerce', utc=True)
     
     # Ensure we only have the 3 required columns in the correct order
-    required_columns = ['id', 'event_timestamp', 'object_id', 'data', 'etl_load_date']
+    required_columns = ['id', 'event_timestamp', 'object_id', 'created_at', 'data', 'etl_load_date']
     if list(df.columns) != required_columns:
         # Reorder and filter to only required columns
         missing_cols = [col for col in required_columns if col not in df.columns]
@@ -253,17 +257,19 @@ def merge_to_bigquery(
         logger.info(f"Reordered DataFrame columns to: {required_columns}")
     
     # Ensure tables exist
-    def ensure_table_exists(table_ref: str):
+    def ensure_table_exists(table_ref: str, is_partitioned: bool = False):
         try:
             bq_client.get_table(table_ref)
             logger.info(f"Table {table_ref} already exists")
         except Exception:
             table = bigquery.Table(table_ref, schema=schema)
+            if is_partitioned:
+                table.time_partitioning = bigquery.TimePartitioning(field="created_at")
             bq_client.create_table(table)
-            logger.info(f"Created table {table_ref}")
+            logger.info(f"Created table {table_ref}" + (" with partitioning on created_at" if is_partitioned else ""))
     
-    ensure_table_exists(table_id)
-    ensure_table_exists(staging_table_id)
+    ensure_table_exists(table_id, is_partitioned=True)
+    ensure_table_exists(staging_table_id, is_partitioned=False)
     
     # Load to staging table (overwrite)
     logger.info(f"Loading {len(df)} rows to staging table {staging_table_id}")
